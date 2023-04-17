@@ -5,9 +5,13 @@ import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
+import java.util.Iterator;
 import java.util.Scanner;
+import java.util.Set;
 
 public class MyApplication extends JFrame implements ActionListener {
 
@@ -44,7 +48,7 @@ public class MyApplication extends JFrame implements ActionListener {
 
     public void actionPerformed(ActionEvent e) {
         if (e.getSource() == showButton) {
-            int selectedButton = -1;
+            int selectedButton = 0;
             if (button1.isSelected()) {
                 selectedButton = 1;
             } else if (button2.isSelected()) {
@@ -54,17 +58,19 @@ public class MyApplication extends JFrame implements ActionListener {
             } else if (button4.isSelected()) {
                 selectedButton = 4;
             }
-            contentToShow = String.valueOf(selectedButton);
+
             try {
                 clientNet(String.valueOf(selectedButton));
             } catch (IOException ex) {
                 throw new RuntimeException(ex);
             }
-            contentFrame(selectedButton, contentToShow);
+            contentFrame(contentToShow);
+
+
         }
     }
 
-    public void contentFrame(int numer, String content){
+    public void contentFrame(String content){
         JFrame frame = new JFrame("Najnowsze wiadomosci");
         JTextField textField = new JTextField(20);
         textField.setText("Numer wciśniętego okna to: " + content);
@@ -87,111 +93,46 @@ public class MyApplication extends JFrame implements ActionListener {
     }
 
     public void clientNet(String contentNumber) throws IOException {
-        SocketChannel channel = null;
-        String server = "localhost"; // adres hosta serwera
-        int port = 12345; // numer portu
+        final int BUFFER_SIZE = 1024;
+        InetSocketAddress address = new InetSocketAddress("localhost", 8080);
+        SocketChannel clientChannel = SocketChannel.open(address);
+        clientChannel.configureBlocking(false);
 
-        try {
-            // Utworzenie kanału
-            channel = SocketChannel.open();
+        Selector selector = Selector.open();
+        clientChannel.register(selector, SelectionKey.OP_WRITE);
 
-            // Ustalenie trybu nieblokującego
-            channel.configureBlocking(false);
+        ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
+        buffer.put(contentNumber.getBytes());
+        buffer.flip();
 
-            // połączenie kanału
-            channel.connect(new InetSocketAddress(server, port));
-
-            System.out.print("Klient: łączę się z serwerem ...");
-
-            while (!channel.finishConnect()) {
-                // ew. pokazywanie czasu łączenia (np. pasek postępu)
-                // lub wykonywanie jakichś innych (krótkotrwałych) działań
-            }
-
-        } catch(UnknownHostException exc) {
-            System.err.println("Uknown host " + server);
-            // ...
-        } catch(Exception exc) {
-            exc.printStackTrace();
-            // ...
-        }
-
-        System.out.println("\nKlient: jestem połączony z serwerem ...");
-
-        Charset charset  = Charset.forName("ISO-8859-2");
-        Scanner scanner = new Scanner(System.in);
-
-        // Alokowanie bufora bajtowego
-        // allocateDirect pozwala na wykorzystanie mechanizmów sprzętowych
-        // do przyspieszenia operacji we/wy
-        // Uwaga: taki bufor powinien być alokowany jednokrotnie
-        // i wielokrotnie wykorzystywany w operacjach we/wy
-        int rozmiar_bufora = 1024;
-        ByteBuffer inBuf = ByteBuffer.allocateDirect(rozmiar_bufora);
-        CharBuffer cbuf = null;
-
-
-        System.out.println("Klient: wysyłam - Hi");
-        // "Powitanie" do serwera
-        channel.write(charset.encode("Hi\n"));
-
-        // pętla czytania
         while (true) {
+            selector.select();
+            Set<SelectionKey> keys = selector.selectedKeys();
+            Iterator<SelectionKey> iter = keys.iterator();
 
-            //cbuf = CharBuffer.wrap("coś" + "\n");
+            while (iter.hasNext()) {
+                SelectionKey key = iter.next();
+                iter.remove();
 
-            inBuf.clear();	// opróżnienie bufora wejściowego
-            int readBytes = channel.read(inBuf); // czytanie nieblokujące
-            // natychmiast zwraca liczbę
-            // przeczytanych bajtów
-
-            // System.out.println("readBytes =  " + readBytes);
-
-            if (readBytes == 0) {                              // jeszcze nie ma danych
-                //System.out.println("zero bajtów");
-
-                // jakieś (krótkotrwałe) działania np. info o upływającym czasie
-
-                continue;
-
+                if (key.isWritable()) {
+                    SocketChannel client = (SocketChannel) key.channel();
+                    client.write(buffer);
+                    key.interestOps(SelectionKey.OP_READ);
+                } else if (key.isReadable()) {
+                    SocketChannel client = (SocketChannel) key.channel();
+                    ByteBuffer clientBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+                    client.read(clientBuffer);
+                    clientBuffer.flip();
+                    String response = new String(clientBuffer.array());
+                    System.out.println("Received: " + response);
+                    contentToShow = response;
+                    client.close();
+                    selector.close();
+                    return;
+                }
             }
-            else if (readBytes == -1) { // kanał zamknięty po stronie serwera
-                // dalsze czytanie niemożlwe
-                // ...
-                break;
-            }
-            else {		// dane dostępne w buforze
-                //System.out.println("coś jest od serwera");
-
-                inBuf.flip();	// przestawienie bufora
-
-                // pobranie danych z bufora
-                // ew. decyzje o tym czy mamy komplet danych - wtedy break
-                // czy też mamy jeszcze coś do odebrania z serwera - kontynuacja
-                cbuf = charset.decode(inBuf);
-
-                String odSerwera = cbuf.toString();
-
-                System.out.println("Klient: serwer właśnie odpisał ... " + odSerwera);
-                contentToShow = odSerwera;
-                cbuf.clear();
-
-                if (odSerwera.equals("Bye")) break;
-            }
-
-            // Teraz klient pisze do serwera poprzez Scanner
-            String input = scanner.nextLine();
-            cbuf = CharBuffer.wrap(input + "\n");
-            ByteBuffer outBuf = charset.encode(cbuf);
-            channel.write(outBuf);
-
-            System.out.println("Klient: piszę " + input);
         }
-
-        scanner.close();
     }
-
-
     public static void main(String[] args) {
 
         new MyApplication();
